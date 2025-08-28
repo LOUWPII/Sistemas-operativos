@@ -21,7 +21,5 @@ Repositorio oficial de la materia **Sistemas Operativos**, donde se desarrollan:
 
 ## Estructura del repositorio
 ```txt
-📁 /teoria        → Apuntes y resúmenes de clase
 📁 /laboratorios  → Ejercicios en en C
 📁 /proyectos     → Implementaciones completas (planificadores, memoria, hilos)
-📁 /docs          → Diagramas y documentación adicional
