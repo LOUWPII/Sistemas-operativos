@@ -1,4 +1,9 @@
-
+/*
+*****************************BIENVENIDO A PIPESOFT**********************************
+Nombre: Juan Felipe Gómez López
+Actividad: Teoría del rendimiento
+Asignatura: Sistemas Operativos
+*/
 
 #ifndef _MODULO_H_ //SI el modulo.h no está definido  el compilador define el modulo.h  y mete el contenido el .h en cada uno de los .c que hagan #include "modulo.h"
 #define _MODULO_H_
