@@ -1,3 +1,11 @@
+/*
+*****************************BIENVENIDO A PIPESOFT**********************************
+Nombre: Juan Felipe Gómez López
+Actividad: Teoría del rendimiento
+Asignatura: Sistemas Operativos
+*/
+
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/time.h>
