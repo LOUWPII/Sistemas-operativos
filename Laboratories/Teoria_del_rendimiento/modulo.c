@@ -1,4 +1,11 @@
 /*
+*****************************BIENVENIDO A PIPESOFT**********************************
+Nombre: Juan Felipe Gómez López
+Actividad: Teoría del rendimiento
+Asignatura: Sistemas Operativos
+*/
+
+/*
 *Se declaran las librerias necesarias
 *stdio.h para entrada y salida de datos por consola
 *stdlib.h para uso de memoria 
