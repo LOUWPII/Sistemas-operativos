@@ -1,49 +1,71 @@
 /*#######################################################################################
- #* Fecha: 30 Octubre 2025
- #* Autor: Xamuel Pérez Madrigal
- #* Programa:
- #*      Multiplicación de Matrices algoritmo matriz Transpuesta (Filas x Filas) 
- #* Versión:
- #*      Paralelismo con OpenMP
- #######################################################################################*/
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <time.h>
-#include <sys/time.h>
-#include <omp.h>
-#include "operacionesMatrices.h"
-#include "operacionesTiempo.h"
+ #* Fecha: 30 Octubre 2025
+ #* Autor: Xamuel Pérez Madrigal
+ #* Programa:
+ #*      Multiplicación de Matrices algoritmo matriz Transpuesta (Filas x Filas) 
+ #* Versión:
+ #*      Paralelismo con OpenMP
+ #######################################################################################*/
+
+// Inclusión de interfaces esenciales.
+#include <stdio.h>    // Para funciones estándar de entrada y salida
+#include <stdlib.h>   // Para funciones de propósito general como calloc, exit
+#include <string.h>   // Para manipulación de cadenas de caracteres
+#include <time.h>     // Para la función time(), usada en srand()
+#include <sys/time.h> // Para funciones de medición de tiempo
+#include <omp.h>      // La librería OpenMP para el paralelismo en CPU.
+
+// Inclusión de cabeceras de funciones propias
+#include "operacionesMatrices.h" // Funciones para inicializar, transponer, e imprimir matrices.
+#include "operacionesTiempo.h"   // Funciones para iniciar/finalizar la medición de tiempo.
 
 int main(int argc, char *argv[]) {
-    if(argc != 3){
-        printf("\n Use: $./clasicaOpenMP SIZE Hilos \n\n");
-        exit(0);
-    }
+    // 1. Verificación de argumentos de entrada
+    if(argc != 3){
+        // Si no se reciben exactamente 3 argumentos, muestra un mensaje de uso y termina.
+        printf("\n Use: $./clasicaOpenMP SIZE Hilos \n\n");
+        exit(0);
+    }
 
-    int N = atoi(argv[1]);
-    int TH = atoi(argv[2]);
-    double *matrixA = (double *)calloc(N*N, sizeof(double));
-    double *matrixB = (double *)calloc(N*N, sizeof(double));
-    double *matrixC = (double *)calloc(N*N, sizeof(double));
-    
-    srand(time(NULL));
-    omp_set_num_threads(TH);
+    // 2. Inicialización de variables y asignación de memoria
+    int N = atoi(argv[1]);  // N: Tamaño de la matriz (N x N)
+    int TH = atoi(argv[2]); // TH: Número de hilos a usar.
 
-    iniMatrix(matrixA, matrixB, N);
-    impMatrix(matrixA, N, 0);
-    impMatrix(matrixB, N, 1);
+    // Asignación dinámica de memoria para las matrices A, B y C (Resultado).
+    double *matrixA = (double *)calloc(N*N, sizeof(double));
+    double *matrixB = (double *)calloc(N*N, sizeof(double));
+    double *matrixC = (double *)calloc(N*N, sizeof(double));
+    
+    // 3. Configuración
+    // Inicializa la semilla para rand().
+    srand(time(NULL));
+    // Configura explícitamente el número de hilos que OpenMP debe usar.
+    omp_set_num_threads(TH);
 
-    InicioMuestra();
-    multiMatrixTrans(matrixA, matrixB, matrixC, N);
-    FinMuestra();
+    // Inicializa las matrices A y B con valores aleatorios.
+    iniMatrix(matrixA, matrixB, N);
 
-    impMatrix(matrixC, N, 0);
+    // Muestra las matrices iniciales 
+    impMatrix(matrixA, N, 0);
+    impMatrix(matrixB, N, 1);
 
-    // Liberación de Memoria
-    free(matrixA);
-    free(matrixB);
-    free(matrixC);
-    
-    return 0;
+    // Inicia la medición de tiempo (registra el tiempo de inicio).
+    InicioMuestra();
+
+    // 4. Multiplicación Paralela con Transposición
+    multiMatrixTrans(matrixA, matrixB, matrixC, N);
+
+    // Finaliza la medición de tiempo. Calcula e imprime el tiempo total de ejecución.
+    FinMuestra();
+
+    // Imprime la matriz resultante C.
+    impMatrix(matrixC, N, 0);
+
+    // 5. Liberación de Recursos
+    // Libera la memoria asignada a las matrices.
+    free(matrixA);
+    free(matrixB);
+    free(matrixC);
+    
+    return 0; // Termina el programa exitosamente.
 }
