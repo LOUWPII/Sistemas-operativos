@@ -1,0 +1,14 @@
+
+CC = gcc                    
+CFLAGS = -Wall -pthread     
+LABS = lab01 lab02 lab03 lab04 lab05 lab06 lab07 lab08 lab09
+
+all: $(LABS)
+
+$(LABS): %: %.c
+	$(CC) $(CFLAGS) $< -o $@   
+
+clean:
+	rm -f $(LABS)             
+
+.PHONY: all clean            
