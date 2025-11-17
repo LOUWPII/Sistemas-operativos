@@ -77,6 +77,14 @@ int main(int argc, char *argv[]) {
 
     fclose(f);
     unlink(pipe_respuesta);
+
+	//TEste es temporal, para que el controlador finalice su ejecucion
+    int fd_exit = open(pipeRecibe, O_WRONLY);
+    if (fd_exit != -1) {
+        write(fd_exit, "exit", 4);
+        close(fd_exit);
+        printf("[AGENTE %s] Enviada señal de salida.\n", nombre);
+    }
     printf("[AGENTE %s] Finalizó el envío de reservas.\n", nombre);
     return 0;
 }
