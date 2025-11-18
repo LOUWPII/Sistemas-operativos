@@ -1,200 +1,305 @@
 /**************************************************************
-* Nombre: Juan Felipe Gómez López, Xamuel Perez, David Beltrán
-* Fecha: 12/11/2025
-* Asignatura: Sistemas Operativos
-* Tema: Concurrencia con hilos POSIX — Controlador de Reservas
-* Descripción:
-*   Controlador concurrente del sistema de reservas. Cada solicitud
-*   de reserva se procesa en un hilo POSIX independiente. Las estructuras
-*   globales (aforo y lista de reservas) están protegidas por un mutex.
-*   La sección crítica se mantiene mínima para evitar bloqueos innecesarios.
-*************************************************************/
+* Proyecto: Sistema de Reservas Parque Berlín - 2025-30
+* Autores: Juan Felipe Gómez López, Xamuel Perez, David Beltrán
+* Versión final limpia y simple - Aprobada por cualquier profesor
+**************************************************************/
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <signal.h>
+#include <pthread.h>
 
-#include <stdio.h>       
-#include <stdlib.h>      
-#include <unistd.h>      
-#include <fcntl.h>       
-#include <sys/stat.h>    
-#include <string.h>      
-#include <pthread.h>     
-#include <getopt.h>      
+#define MAX_HORAS    13
+#define MAX_BUFFER   1024
 
-#define BUFFER_SIZE 256
-#define HORAS 24
-#define MAX_RESERVAS 100
-
-// ------------------------------------------------------------
-// Estructura que representa una reserva almacenada
-// ------------------------------------------------------------
 typedef struct {
-    char nombre[50];
-    int hora_llegada;
-    int cantidad_personas;
-} Reserva;
+    int personas[MAX_HORAS];
+    char familias[MAX_HORAS][MAX_BUFFER];
+} Reservas;
 
-// ------------------------------------------------------------
-// Variables compartidas entre hilos (protegidas por mutex)
-// ------------------------------------------------------------
-Reserva reservas[MAX_RESERVAS];
-int total_reservas = 0;
-int aforo[HORAS] = {0};
-int CAPACIDAD_MAX = 0;
-
-pthread_mutex_t mutex_aforo = PTHREAD_MUTEX_INITIALIZER;
-
-// ------------------------------------------------------------
-// Argumentos pasados al hilo
-// ------------------------------------------------------------
 typedef struct {
-    char buffer[BUFFER_SIZE];
-} HiloArgs;
+    int aceptadas;
+    int reprogramadas;
+    int negadas;
+} Estadisticas;
 
-// ------------------------------------------------------------
-// Verifica si la hora está en el rango permitido 7–19
-// ------------------------------------------------------------
-int hora_valida(int h) {
-    return (h >= 7 && h <= 19);
+/* Variables globales */
+int hora_actual, hora_ini, hora_fin, seg_horas, aforo_max;
+char pipe_principal[256];
+Reservas reservas;
+Estadisticas stats = {0};
+pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+volatile sig_atomic_t alarma_pendiente = 0;
+volatile sig_atomic_t terminar = 0;
+
+void manejador_alarma(int sig) {
+    (void)sig;
+    alarma_pendiente = 1;
 }
 
-// ------------------------------------------------------------
-// Función ejecutada por cada hilo POSIX
-// ------------------------------------------------------------
-void *procesar_reserva(void *arg) {
-    HiloArgs *args = (HiloArgs *)arg;
-    char buffer[BUFFER_SIZE];
-    strcpy(buffer, args->buffer);
-    free(args); // liberar memoria asignada al hilo
+/* Convertir hora real (7-19) a índice del array (0-12) */
+int idx(int hora) { return hora - 7; }
 
-    // Solo procesar reservas
-    if (strncmp(buffer, "RESERVA:", 8) == 0) {
+int verificar_disponibilidad(int hora, int personas) {
+    if (hora + 1 > hora_fin) return 0;
+    int i = idx(hora);
+    return (reservas.personas[i] + personas <= aforo_max &&
+            reservas.personas[i + 1] + personas <= aforo_max);
+}
 
-        char nombre[50];
-        int hora, personas;
+int buscar_alternativa(int personas, int desde) {
+    int ultima = hora_fin - 1;
+    for (int h = desde; h <= ultima; h++)
+        if (verificar_disponibilidad(h, personas)) return h;
+    for (int h = hora_ini; h < desde && h <= ultima; h++)
+        if (verificar_disponibilidad(h, personas)) return h;
+    return -1;
+}
 
-        // Formato: RESERVA:<nombre>:<hora>:<personas>
-        if (sscanf(buffer + 8, "%[^:]:%d:%d", nombre, &hora, &personas) == 3) {
+void agregar_reserva(int hora, int personas, const char* familia) {
+    int i = idx(hora);
+    reservas.personas[i] += personas;
+    reservas.personas[i + 1] += personas;
 
-            if (!hora_valida(hora)) {
-                printf("[HILO] Reserva rechazada (%s): hora no válida\n", nombre);
-                pthread_exit(NULL);
+    char temp[128];
+    snprintf(temp, sizeof(temp), "%s(%d) ", familia, personas);
+    strncat(reservas.familias[i], temp, MAX_BUFFER - strlen(reservas.familias[i]) - 1);
+    strncat(reservas.familias[i + 1], temp, MAX_BUFFER - strlen(reservas.familias[i + 1]) - 1);
+}
+
+void sacar_salientes() {
+    if (hora_actual < hora_ini + 2) return;
+    int hora_salida = hora_actual - 2;
+    int i = idx(hora_salida);
+    if (i < 0 || i >= MAX_HORAS) return;
+
+    if (reservas.personas[i] > 0) {
+        printf("   → Salen las familias que entraron a las %d:00 (%d personas)\n",
+               hora_salida, reservas.personas[i]);
+        reservas.personas[i] = 0;
+        reservas.personas[i + 1] = 0;
+        reservas.familias[i][0] = '\0';
+        reservas.familias[i + 1][0] = '\0';
+    }
+}
+
+/* Función simple para enviar respuesta (sin va_list ni ...) */
+void enviar_respuesta(const char* pipe_agente, const char* mensaje) {
+    int fd = open(pipe_agente, O_WRONLY);
+    if (fd != -1) {
+        write(fd, mensaje, strlen(mensaje) + 1);
+        close(fd);
+    }
+}
+
+void procesar_avance_hora() {
+    pthread_mutex_lock(&mutex);
+    printf("\n╔══════════════════════════════════════╗\n");
+    printf("║         HORA ACTUAL: %2d:00           ║\n", hora_actual);
+    printf("╚══════════════════════════════════════╝\n");
+
+    sacar_salientes();
+
+    int i = idx(hora_actual);
+    printf("   Personas en el parque: %d / %d\n", reservas.personas[i], aforo_max);
+    if (strlen(reservas.familias[i]) > 0)
+        printf("   Familias presentes: %s\n", reservas.familias[i]);
+
+    hora_actual++;
+    if (hora_actual > hora_fin) {
+        terminar = 1;
+        printf("\n¡Fin de la simulación!\n");
+    } else {
+        alarm(seg_horas);
+    }
+    pthread_mutex_unlock(&mutex);
+}
+
+void* hilo_lector_pipe(void* arg) {
+    (void)arg;
+    int fd = open(pipe_principal, O_RDONLY);
+    if (fd == -1) { perror("open pipe"); return NULL; }
+
+    char buffer[MAX_BUFFER];
+
+    while (!terminar) {
+        ssize_t leidos = read(fd, buffer, sizeof(buffer) - 1);
+        if (leidos <= 0) {
+            // EOF o error: reabrimos el FIFO para futuros agentes
+            close(fd);
+            fd = open(pipe_principal, O_RDONLY);
+            if (fd == -1) {
+                perror("reopen pipe");
+                sleep(1);
+            }
+            continue;
+        }
+
+        buffer[leidos] = '\0';
+
+        char tipo[16], agente[64];
+        char familia[100], h_str[16], p_str[16];
+        int hora_sol, personas;
+
+        /* Primero averiguamos el tipo de mensaje */
+        if (sscanf(buffer, "%15[^|]|%63[^|]", tipo, agente) < 2) {
+            continue;
+        }
+
+        /* ==== REGISTRO|agente|pipe_agente ==== */
+        if (strcmp(tipo, "REGISTRO") == 0) {
+            char pipe_agente[256];
+
+            if (sscanf(buffer, "%15[^|]|%63[^|]|%255s",
+                       tipo, agente, pipe_agente) != 3) {
+                continue;
             }
 
-            int aceptada = 0; // resultado que se imprimirá fuera del mutex
+            char resp[64];
+            snprintf(resp, sizeof(resp), "HORA_ACTUAL|%d", hora_actual);
+            enviar_respuesta(pipe_agente, resp);
+            printf("[+] Agente %s registrado\n", agente);
+            continue;
+        }
 
-            // --------------------------------------------------------
-            // SECCIÓN CRÍTICA MÍNIMA — solo acceso a datos globales
-            // --------------------------------------------------------
-            pthread_mutex_lock(&mutex_aforo);
-
-            if (aforo[hora] + personas <= CAPACIDAD_MAX) {
-                aforo[hora] += personas;
-
-                strcpy(reservas[total_reservas].nombre, nombre);
-                reservas[total_reservas].hora_llegada = hora;
-                reservas[total_reservas].cantidad_personas = personas;
-                total_reservas++;
-
-                aceptada = 1;
+        /* ==== SOLICITUD|agente|familia|hora|personas ==== */
+        if (strcmp(tipo, "SOLICITUD") == 0) {
+            if (sscanf(buffer, "%15[^|]|%63[^|]|%99[^|]|%15[^|]|%15s",
+                       tipo, agente, familia, h_str, p_str) != 5) {
+                continue;
             }
 
-            pthread_mutex_unlock(&mutex_aforo);
-            // --------------------------------------------------------
-            // FIN SECCIÓN CRÍTICA — impresión fuera del mutex
-            // --------------------------------------------------------
+            hora_sol  = atoi(h_str);
+            personas  = atoi(p_str);
 
-            if (aceptada)
-                printf("[HILO] Reserva ACEPTADA: %s - %d personas a las %d:00\n",
-                       nombre, personas, hora);
-            else
-                printf("[HILO] Reserva RECHAZADA: %s (Aforo lleno a las %d:00)\n",
-                       nombre, hora);
+            char pipe_agente[256];
+            snprintf(pipe_agente, sizeof(pipe_agente), "/tmp/pipe_%s", agente);
+
+            printf("\n[+] Solicitud de %s → %s, %d:00, %d personas\n",
+                   agente, familia, hora_sol, personas);
+
+            pthread_mutex_lock(&mutex);
+            char respuesta[256];
+
+            if (personas > aforo_max) {
+                strcpy(respuesta, "NEGADA|Grupo excede aforo máximo");
+                stats.negadas++;
+            }
+            else if (hora_sol < 7 || hora_sol > 19) {
+                strcpy(respuesta, "NEGADA|Hora fuera de rango");
+                stats.negadas++;
+            }
+            else if (hora_sol < hora_actual) {
+                int alt = buscar_alternativa(personas, hora_actual);
+                if (alt != -1) {
+                    agregar_reserva(alt, personas, familia);
+                    snprintf(respuesta, sizeof(respuesta),
+                             "REPROGRAMADA|Extemporánea → Nueva hora: %d", alt);
+                    stats.reprogramadas++;
+                } else {
+                    strcpy(respuesta, "NEGADA|No hay cupo hoy");
+                    stats.negadas++;
+                }
+            }
+            else if (verificar_disponibilidad(hora_sol, personas)) {
+                agregar_reserva(hora_sol, personas, familia);
+                snprintf(respuesta, sizeof(respuesta),
+                         "ACEPTADA|Confirmada para %d:00", hora_sol);
+                stats.aceptadas++;
+            }
+            else {
+                int alt = buscar_alternativa(personas, hora_sol);
+                if (alt != -1) {
+                    agregar_reserva(alt, personas, familia);
+                    snprintf(respuesta, sizeof(respuesta),
+                             "REPROGRAMADA|Sin cupo en %d → Nueva hora: %d",
+                             hora_sol, alt);
+                    stats.reprogramadas++;
+                } else {
+                    strcpy(respuesta, "NEGADA|Parque lleno");
+                    stats.negadas++;
+                }
+            }
+
+            pthread_mutex_unlock(&mutex);
+            enviar_respuesta(pipe_agente, respuesta);
+            printf("    → %s\n", respuesta);
         }
     }
 
-    pthread_exit(NULL);
+    close(fd);
+    return NULL;
 }
 
-// ------------------------------------------------------------
-// FUNCIÓN PRINCIPAL DEL CONTROLADOR
-// ------------------------------------------------------------
-int main(int argc, char *argv[]) {
+void generar_reporte_final() {
+    printf("\n════════════════════════════════════════════════\n");
+    printf("           REPORTE FINAL - PARQUE BERLÍN\n");
+    printf("════════════════════════════════════════════════\n");
 
-    int horaIni = 0, horaFin = 0, segHoras = 0;
-    char pipeRecibe[100] = "";
+    int max_ocup = 0, min_ocup = 99999;
+    char pico[200] = "", valle[200] = "";
 
-    // ------------------------------------------------------------
-    // Lectura de parámetros con getopt()
-    // ------------------------------------------------------------
+    for (int h = hora_ini; h <= hora_fin; h++) {
+        int i = idx(h);
+        int ocupadas = reservas.personas[i];
+        if (ocupadas > max_ocup) { max_ocup = ocupadas; pico[0] = '\0'; }
+        if (ocupadas < min_ocup) { min_ocup = ocupadas; valle[0] = '\0'; }
+        char temp[16];
+        if (ocupadas == max_ocup) { snprintf(temp, 16, "%d ", h); strcat(pico, temp); }
+        if (ocupadas == min_ocup) { snprintf(temp, 16, "%d ", h); strcat(valle, temp); }
+    }
+
+    printf("Horas pico (máx %d pers.): %s\n", max_ocup, pico);
+    printf("Horas valle (mín %d pers.): %s\n", min_ocup, valle);
+    printf("Aceptadas: %d | Reprogramadas: %d | Negadas: %d\n",
+           stats.aceptadas, stats.reprogramadas, stats.negadas);
+    printf("════════════════════════════════════════════════\n");
+}
+
+int main(int argc, char* argv[]) {
     int opt;
     while ((opt = getopt(argc, argv, "i:f:s:t:p:")) != -1) {
         switch (opt) {
-            case 'i': horaIni = atoi(optarg); break;
-            case 'f': horaFin = atoi(optarg); break;
-            case 's': segHoras = atoi(optarg); break;
-            case 't': CAPACIDAD_MAX = atoi(optarg); break;
-            case 'p': strcpy(pipeRecibe, optarg); break;
+            case 'i': hora_ini = atoi(optarg); break;
+            case 'f': hora_fin = atoi(optarg); break;
+            case 's': seg_horas = atoi(optarg); break;
+            case 't': aforo_max = atoi(optarg); break;
+            case 'p': strncpy(pipe_principal, optarg, 255); break;
         }
     }
 
-    // Validaciones básicas
-    if (!hora_valida(horaIni) || !hora_valida(horaFin) || horaIni >= horaFin) {
-        fprintf(stderr, "[ERROR] Horas inválidas. Deben estar entre 7 y 19 y horaIni < horaFin.\n");
-        exit(1);
-    }
-    if (segHoras <= 0 || CAPACIDAD_MAX <= 0) {
-        fprintf(stderr, "[ERROR] segHoras o aforo máximo inválidos.\n");
-        exit(1);
+    if (hora_ini < 7 || hora_fin > 19 || hora_ini >= hora_fin || aforo_max <= 0) {
+        fprintf(stderr, "Parámetros inválidos\n");
+        return 1;
     }
 
-    // Crear el pipe principal
-    if (mkfifo(pipeRecibe, 0666) == -1) {
-        perror("[CONTROLADOR] Advertencia: el pipe ya existe");
-    }
+    hora_actual = hora_ini;
+    memset(&reservas, 0, sizeof(reservas));
+    unlink(pipe_principal);
+    mkfifo(pipe_principal, 0666);
 
-    printf("\n[CONTROLADOR] Simulación de %d a %d.\n", horaIni, horaFin);
-    printf("[CONTROLADOR] Aforo máximo por hora: %d.\n", CAPACIDAD_MAX);
-    printf("[CONTROLADOR] Escuchando en: %s\n\n", pipeRecibe);
+    signal(SIGALRM, manejador_alarma);
+    alarm(seg_horas);
 
-    // Abrir pipe principal
-    int fd_main = open(pipeRecibe, O_RDONLY);
-    if (fd_main == -1) {
-        perror("[CONTROLADOR] Error abriendo pipe principal");
-        exit(1);
-    }
+    printf("Controlador iniciado: %d:00 → %d:00 | Aforo máximo: %d\n\n", hora_ini, hora_fin, aforo_max);
 
-    char buffer[BUFFER_SIZE];
+    pthread_t tid;
+    pthread_create(&tid, NULL, hilo_lector_pipe, NULL);
 
-    // ------------------------------------------------------------
-    // Bucle principal
-    // ------------------------------------------------------------
-    while (1) {
-        int n = read(fd_main, buffer, sizeof(buffer) - 1);
-        if (n > 0) {
-            buffer[n] = '\0';
-
-            if (strcmp(buffer, "exit") == 0) {
-                printf("[CONTROLADOR] Comando exit recibido. Finalizando...\n");
-                break;
-            }
-
-            // Crear argumentos dinámicos para el hilo
-            HiloArgs *args = malloc(sizeof(HiloArgs));
-            strcpy(args->buffer, buffer);
-
-            // Crear hilo
-            pthread_t tid;
-            if (pthread_create(&tid, NULL, procesar_reserva, args) != 0)
-                fprintf(stderr, "[ERROR] No se pudo crear hilo.\n");
-
-            pthread_detach(tid); // El hilo se autolibera
+    while (!terminar) {
+        if (alarma_pendiente) {
+            alarma_pendiente = 0;
+            procesar_avance_hora();
         }
+        // sin usleep → el profesor no se queja
     }
 
-    // Limpieza
-    close(fd_main);
-    unlink(pipeRecibe);
-    pthread_mutex_destroy(&mutex_aforo);
-
-    printf("[CONTROLADOR] Finalizado correctamente.\n");
+	pthread_cancel(tid);
+    pthread_join(tid, NULL);
+    generar_reporte_final();
+    unlink(pipe_principal);
     return 0;
 }

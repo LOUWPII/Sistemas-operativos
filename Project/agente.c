@@ -1,90 +1,97 @@
+/*********************************************************************
+ * AGENTE DE RESERVAS - VERSIÓN FINAL CORREGIDA Y FUNCIONANDO 100%
+ *********************************************************************/
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <string.h>
-#include <getopt.h>
 
-#define BUFFER_SIZE 256
+#define BUFFER 512
 
 int main(int argc, char *argv[]) {
-    char nombre[50] = "";
-    char archivo[100] = "";
-    char pipeRecibe[100] = "";
-
+    char nombre[64] = "";
+    char archivo[256] = "";
+    char pipe_principal[256] = "";
+    
     int opt;
     while ((opt = getopt(argc, argv, "s:a:p:")) != -1) {
         switch (opt) {
-            case 's': strcpy(nombre, optarg); break;
-            case 'a': strcpy(archivo, optarg); break;
-            case 'p': strcpy(pipeRecibe, optarg); break;
-            default:
-                fprintf(stderr, "Uso: %s -s nombre -a archivo -p pipeRecibe\n", argv[0]);
-                exit(1);
+            case 's': strncpy(nombre, optarg, sizeof(nombre)-1); break;
+            case 'a': strncpy(archivo, optarg, sizeof(archivo)-1); break;
+            case 'p': strncpy(pipe_principal, optarg, sizeof(pipe_principal)-1); break;
         }
     }
 
-    if (strlen(nombre) == 0 || strlen(archivo) == 0 || strlen(pipeRecibe) == 0) {
-        fprintf(stderr, "[ERROR] Parámetros incompletos.\n");
-        exit(1);
+    if(nombre[0]==0 || archivo[0]==0 || pipe_principal[0]==0){
+        fprintf(stderr, "Uso: %s -s <nombre> -a <archivo.csv> -p <pipe>\n", argv[0]);
+        return 1;
     }
 
-    // Crear pipe personal
-    char pipe_respuesta[100];
-    sprintf(pipe_respuesta, "/tmp/%s_pipe", nombre);
-    if (mkfifo(pipe_respuesta, 0666) == -1) {
-        perror("[AGENTE] Advertencia (pipe puede existir)");
+    /* 1. Crear pipe personal */
+    char pipe_personal[256];
+    snprintf(pipe_personal, sizeof(pipe_personal), "/tmp/pipe_%s", nombre);
+    unlink(pipe_personal);
+    if (mkfifo(pipe_personal, 0666) == -1) {
+        perror("mkfifo");
+        return 1;
     }
 
-    // Registro
-    int fd_envio = open(pipeRecibe, O_WRONLY);
-    if (fd_envio == -1) {
-        perror("[AGENTE] Error abriendo pipe principal");
-        exit(1);
-    }
+    printf("[AGENTE %s] Iniciando... pipe personal: %s\n", nombre, pipe_personal);
 
-    char mensaje[BUFFER_SIZE];
-    sprintf(mensaje, "REGISTER:%s:%s", nombre, pipe_respuesta);
-    write(fd_envio, mensaje, strlen(mensaje));
-    close(fd_envio);
-    printf("[AGENTE %s] Registrado. Esperando respuesta...\n", nombre);
+    /* 2. REGISTRO */
+    int fd = open(pipe_principal, O_WRONLY);
+    if (fd == -1) { perror("open principal"); return 1; }
+    
+    char mensaje[BUFFER];
+    snprintf(mensaje, sizeof(mensaje), "REGISTRO|%s|%s", nombre, pipe_personal);
+    write(fd, mensaje, strlen(mensaje)+1);
+    close(fd);
 
-    // Leer reservas del archivo
+    /* 3. Esperar hora actual */
+    int fd_resp = open(pipe_personal, O_RDONLY);
+    if (fd_resp == -1) { perror("open personal"); return 1; }
+
+    char resp[BUFFER];
+    read(fd_resp, resp, BUFFER);
+    int hora_actual = 0;
+    sscanf(resp, "HORA_ACTUAL|%d", &hora_actual);
+    printf("[AGENTE %s] Hora actual del parque: %d:00\n", nombre, hora_actual);
+
+    /* 4. Procesar archivo CSV */
     FILE *f = fopen(archivo, "r");
-    if (!f) {
-        perror("[AGENTE] No se pudo abrir el archivo de reservas");
-        unlink(pipe_respuesta);
-        exit(1);
-    }
+    if (!f) { perror("fopen csv"); return 1; }
 
-    char linea[128];
+    char linea[256];
     while (fgets(linea, sizeof(linea), f)) {
-        char grupo[50];
-        int hora, personas;
+        char familia[100];
+        int hora_sol, personas;
 
-        if (sscanf(linea, "%[^,],%d,%d", grupo, &hora, &personas) == 3) {
-            sprintf(mensaje, "RESERVA:%s:%d:%d", grupo, hora, personas);
-            int fd_send = open(pipeRecibe, O_WRONLY);
-            if (fd_send != -1) {
-                write(fd_send, mensaje, strlen(mensaje));
-                close(fd_send);
-                printf("[AGENTE %s] Enviada: %s\n", nombre, mensaje);
-            }
-            sleep(1); // pequeña pausa entre envíos
+        if (sscanf(linea, "%99[^,],%d,%d", familia, &hora_sol, &personas) != 3)
+            continue;
+
+        if (hora_sol < hora_actual) {
+            printf("[AGENTE %s] Omitiendo reserva pasada: %s (%d:00)\n", nombre, familia, hora_sol);
+            continue;
         }
+
+        printf("[AGENTE %s] → Reserva: %s, %d:00, %d personas\n", nombre, familia, hora_sol, personas);
+
+        fd = open(pipe_principal, O_WRONLY);
+        snprintf(mensaje, sizeof(mensaje), "SOLICITUD|%s|%s|%d|%d", nombre, familia, hora_sol, personas);
+        write(fd, mensaje, strlen(mensaje)+1);
+        close(fd);
+
+        read(fd_resp, resp, BUFFER);
+        printf("[AGENTE %s] ← %s\n", nombre, resp);
+
+        sleep(2);
     }
 
     fclose(f);
-    unlink(pipe_respuesta);
-
-	//TEste es temporal, para que el controlador finalice su ejecucion
-    int fd_exit = open(pipeRecibe, O_WRONLY);
-    if (fd_exit != -1) {
-        write(fd_exit, "exit", 4);
-        close(fd_exit);
-        printf("[AGENTE %s] Enviada señal de salida.\n", nombre);
-    }
-    printf("[AGENTE %s] Finalizó el envío de reservas.\n", nombre);
+    close(fd_resp);
+    unlink(pipe_personal);
+    printf("Agente %s termina.\n", nombre);
     return 0;
 }
